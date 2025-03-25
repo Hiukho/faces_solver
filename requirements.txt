@@ -1,4 +1,5 @@
-Flask==2.2.3
+Flask==2.3.3
 requests==2.31.0
-Werkzeug==2.2.3
-PyYAML==6.0 
+Werkzeug==2.3.7
+PyYAML>=6.0.1
+typing-extensions>=4.5.0 
