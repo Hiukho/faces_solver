@@ -1,0 +1,301 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lucca Faces Solver</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            padding-top: 2rem;
+            padding-bottom: 2rem;
+        }
+        .jumbotron {
+            padding: 2rem 1rem;
+            margin-bottom: 2rem;
+            background-color: #e9ecef;
+            border-radius: 0.3rem;
+        }
+        #results {
+            display: none;
+        }
+        #loading {
+            display: none;
+            text-align: center;
+            margin: 20px 0;
+        }
+        .log-container {
+            max-height: 400px;
+            overflow-y: auto;
+            background-color: #f8f9fa;
+            padding: 10px;
+            border-radius: 5px;
+            border: 1px solid #dee2e6;
+            font-family: monospace;
+            white-space: pre-wrap;
+        }
+        .score-card {
+            margin-bottom: 20px;
+        }
+        .instructions-image {
+            max-width: 100%;
+            height: auto;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="jumbotron">
+            <h1 class="display-4">Lucca Faces Solver</h1>
+            <p class="lead">Un outil pour obtenir un score parfait au jeu Lucca Faces</p>
+            <hr class="my-4">
+            <p class="mb-0">Cet outil vous permet d'utiliser l'apprentissage automatique pour reconnaître les visages et gagner au jeu Lucca Faces. Plus vous l'utilisez, plus il devient précis.</p>
+        </div>
+
+        <!-- Message d'avertissement -->
+        <div class="alert alert-danger mb-4">
+            <h4 class="alert-heading"><i class="fas fa-exclamation-triangle"></i> Avertissement important !</h4>
+            <p><strong>L'utilisation de cette application se fait à vos risques et périls.</strong> Le concepteur de l'application n'est pas responsable de la mauvaise utilisation qui pourrait être faite des données collectées ou traitées.</p>
+            <hr>
+            <p class="mb-0">En utilisant cette application, vous reconnaissez avoir pris connaissance de cet avertissement et acceptez les risques potentiels liés à l'utilisation de cet outil.</p>
+        </div>
+
+        <div class="row">
+            <div class="col-12">
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <h3>Comment ça marche ?</h3>
+                    </div>
+                    <div class="card-body">
+                        <ol>
+                            <li>Allez sur <a href="https://aramis.ilucca.net/faces/game" target="_blank">Lucca Faces</a> et connectez-vous</li>
+                            <li>Ouvrez les outils de développement (F12 ou clic droit > Inspecter)</li>
+                            <li>Allez dans l'onglet "Network" (Réseau)</li>
+                            <li>Actualisez la page et recherchez la requête vers "<code>games</code>"</li>
+                            <li>Faites un clic droit sur cette requête et sélectionnez "Copy as cURL" (Copier comme cURL)</li>
+                            <li>Collez la commande cURL dans le champ ci-dessous et cliquez sur "Lancer le jeu"</li>
+                        </ol>
+                        <p class="text-warning">Note : Assurez-vous d'être bien connecté à Lucca avant de copier la commande cURL.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="row">
+            <div class="col-12">
+                <div class="card mb-4">
+                    <div class="card-header">
+                        <h3>Soumettre la commande cURL</h3>
+                    </div>
+                    <div class="card-body">
+                        <form id="curlForm">
+                            <div class="mb-3">
+                                <label for="curlCommand" class="form-label">Commande cURL</label>
+                                <textarea class="form-control" id="curlCommand" rows="5" placeholder="Collez ici la commande cURL..."></textarea>
+                                <div class="form-text">La commande doit contenir vos cookies d'authentification pour que le jeu fonctionne.</div>
+                            </div>
+                            <div class="alert alert-info">
+                                <h4 class="alert-heading">Astuces importantes :</h4>
+                                <ul>
+                                    <li>La commande cURL doit contenir l'option <code>-b</code> avec vos cookies d'authentification</li>
+                                    <li>Assurez-vous que la commande cURL provient bien de la requête vers <code>https://aramis.ilucca.net/faces/api/games</code></li>
+                                    <li>En cas d'erreur, vérifiez que vos cookies sont toujours valides en vous reconnectant à Lucca</li>
+                                </ul>
+                            </div>
+                            <button type="submit" class="btn btn-primary">Lancer le jeu</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div id="loading">
+            <div class="spinner-border text-primary" role="status">
+                <span class="visually-hidden">Loading...</span>
+            </div>
+            <p>Le jeu est en cours d'exécution, veuillez patienter...</p>
+            <p class="text-muted">Cela peut prendre jusqu'à 1 minute pour traiter les 10 questions.</p>
+        </div>
+
+        <div id="error" class="alert alert-danger mt-4" style="display: none;"></div>
+
+        <div id="results">
+            <div class="row">
+                <div class="col-md-6">
+                    <div class="card score-card">
+                        <div class="card-header">
+                            <h3>Résultats du jeu</h3>
+                        </div>
+                        <div class="card-body">
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <div class="mb-3">
+                                        <h5>Score total</h5>
+                                        <p id="totalScore" class="display-4 text-primary">0</p>
+                                    </div>
+                                </div>
+                                <div class="col-md-6">
+                                    <div class="mb-3">
+                                        <h5>Précision</h5>
+                                        <p id="accuracy" class="display-4 text-success">0%</p>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <div class="mb-3">
+                                        <h5>Réponses correctes</h5>
+                                        <p id="correctGuesses" class="h4">0/0</p>
+                                    </div>
+                                </div>
+                                <div class="col-md-6">
+                                    <div class="mb-3">
+                                        <h5>Personnes connues</h5>
+                                        <p id="hashNameCount" class="h4">0</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>Comment ça fonctionne</h3>
+                        </div>
+                        <div class="card-body">
+                            <p>L'outil utilise un système d'apprentissage cumulatif :</p>
+                            <ul>
+                                <li>Il enregistre le hash de chaque visage avec le nom correct</li>
+                                <li>Quand il rencontre une image déjà vue, il la reconnaît automatiquement</li>
+                                <li>Plus vous utilisez l'outil, plus sa base de connaissances s'enrichit</li>
+                                <li>Votre score s'améliore au fur et à mesure des utilisations</li>
+                            </ul>
+                            <p class="text-success">Actuellement, la base de données contient <span id="hashNameCountText">0</span> visages uniques !</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card mt-4">
+                <div class="card-header">
+                    <h3>Logs détaillés</h3>
+                </div>
+                <div class="card-body">
+                    <div id="logs" class="log-container"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        document.getElementById('curlForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const curlCommand = document.getElementById('curlCommand').value;
+            if (!curlCommand) {
+                showError("Veuillez coller une commande cURL");
+                return;
+            }
+
+            // Masquer les résultats précédents et les erreurs
+            document.getElementById('results').style.display = 'none';
+            document.getElementById('error').style.display = 'none';
+            
+            // Afficher le spinner de chargement
+            document.getElementById('loading').style.display = 'block';
+
+            // Envoyer la requête au serveur
+            fetch('/run', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: new URLSearchParams({
+                    'curl_command': curlCommand
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                // Cacher le spinner
+                document.getElementById('loading').style.display = 'none';
+                
+                if (data.error) {
+                    showError(data.error);
+                    
+                    // Si des logs sont disponibles malgré l'erreur, les afficher
+                    if (data.logs) {
+                        displayLogs(data.logs);
+                        document.getElementById('results').style.display = 'block';
+                    }
+                    return;
+                }
+                
+                // Afficher les résultats
+                document.getElementById('totalScore').textContent = data.total_score;
+                document.getElementById('accuracy').textContent = data.accuracy;
+                document.getElementById('correctGuesses').textContent = `${data.correct_guesses}/${data.total_guesses}`;
+                document.getElementById('hashNameCount').textContent = data.hash_name_count;
+                document.getElementById('hashNameCountText').textContent = data.hash_name_count;
+                
+                // Afficher les logs
+                displayLogs(data.logs);
+                
+                // Afficher la section des résultats
+                document.getElementById('results').style.display = 'block';
+            })
+            .catch(error => {
+                document.getElementById('loading').style.display = 'none';
+                showError("Erreur lors de la communication avec le serveur: " + error.message);
+            });
+        });
+
+        function displayLogs(logs) {
+            const logsContainer = document.getElementById('logs');
+            logsContainer.innerHTML = '';
+            
+            if (logs && logs.length > 0) {
+                logs.forEach(log => {
+                    const logLine = document.createElement('div');
+                    logLine.textContent = log;
+                    
+                    // Colorer certains messages pour une meilleure lisibilité
+                    if (log.includes('correcte') || log.includes('succès')) {
+                        logLine.style.color = 'green';
+                    } else if (log.includes('Erreur') || log.includes('erreur')) {
+                        logLine.style.color = 'red';
+                    } else if (log.includes('Hash déjà connu')) {
+                        logLine.style.color = 'blue';
+                    }
+                    
+                    logsContainer.appendChild(logLine);
+                });
+                
+                // Auto-scroll jusqu'en bas des logs
+                logsContainer.scrollTop = logsContainer.scrollHeight;
+            } else {
+                logsContainer.textContent = 'Aucun log disponible.';
+            }
+        }
+
+        function showError(message) {
+            const errorElement = document.getElementById('error');
+            errorElement.innerHTML = `<strong>Erreur :</strong> ${message}<br><br>
+            <p>Solutions possibles :</p>
+            <ul>
+                <li>Vérifiez que vous utilisez bien une commande cURL issue de la requête "games"</li>
+                <li>Assurez-vous que les cookies d'authentification sont inclus (option -b)</li>
+                <li>Reconnectez-vous à Lucca et récupérez une nouvelle commande cURL</li>
+            </ul>`;
+            errorElement.style.display = 'block';
+        }
+    </script>
+    <!-- Inclure Font Awesome pour les icônes -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css">
+    <!-- Inclure Bootstrap JS pour les modals -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html> 
