@@ -1,69 +1,146 @@
-# Lucca Faces Solver
+# Faces Solver
 
-Un outil pour obtenir un score parfait au jeu Lucca Faces en automatisant la reconnaissance et la mémorisation des visages.
+Un solveur pour le jeu Faces de Lucca, utilisant Redis pour le cache et des requêtes asynchrones pour optimiser les performances.
+
+## Architecture
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant App
+    participant Redis
+    participant API
+    participant JSON
+
+    Note over App: Initialisation
+    App->>Redis: Chargement des données existantes
+    Redis-->>App: Données du cache
+
+    Note over App: Création du jeu
+    App->>API: POST /games
+    API-->>App: game_id
+
+    Note over App: Récupération des questions
+    App->>API: POST /questions/next
+    API-->>App: Première question (ID)
+
+    Note over App: Récupération asynchrone des images
+    par Images
+        App->>API: GET /questions/{id}/picture
+        API-->>App: Image
+        App->>App: Calcul du hash
+    and
+        App->>API: GET /questions/{id+1}/picture
+        API-->>App: Image
+        App->>App: Calcul du hash
+    and
+        App->>API: GET /questions/{id+2}/picture
+        API-->>App: Image
+        App->>App: Calcul du hash
+    end
+
+    Note over App: Boucle de jeu
+    loop Pour chaque question
+        App->>API: POST /questions/next
+        API-->>App: Question suivante
+        App->>Redis: Vérification du cache
+        alt Cache hit
+            Redis-->>App: Nom connu
+            App->>API: POST /guess avec ID connu
+        else Cache miss
+            App->>API: POST /guess avec première suggestion
+        end
+        API-->>App: Résultat
+        App->>Redis: Mise à jour du cache
+        App->>JSON: Sauvegarde des nouvelles associations
+    end
+
+    Note over App: Fin de partie
+    App->>App: Calcul des statistiques
+```
 
 ## Fonctionnalités
 
-- **Reconnaissance automatique :** Mémorise les visages et les noms associés
-- **Apprentissage cumulatif :** Plus vous l'utilisez, meilleure est sa performance
-- **Base de données triée :** Les associations sont stockées dans un fichier JSON trié par ordre alphabétique
-- **Suivi des performances :** Affiche un résumé du jeu avec score total et précision
-- **Interface web :** Une interface intuitive pour utiliser l'outil depuis votre navigateur
+- Cache Redis pour les accès rapides aux associations hash-nom
+- Persistance des données dans un fichier JSON
+- Récupération asynchrone des images pour optimiser les performances
+- Gestion des erreurs et logging détaillé
+- Interface web pour la configuration et le suivi
+- Vérification précise des réponses via `correctSuggestionId`
 
 ## Installation
 
-1. Clonez ce dépôt
-2. Installez les dépendances :
-   ```
-   pip install -r requirements.txt
-   ```
+1. Installer Redis :
+```bash
+# macOS
+brew install redis
+brew services start redis
 
-## Utilisation
-
-### Via l'interface web (recommandé)
-
-1. Lancez le serveur web :
-   ```
-   python app.py
-   ```
-2. Ouvrez votre navigateur à l'adresse `http://localhost:8080`
-3. Suivez les instructions à l'écran pour copier une commande cURL depuis le site Lucca Faces
-4. Collez la commande cURL dans le formulaire et lancez le jeu
-5. Les résultats s'afficheront automatiquement une fois le jeu terminé
-
-### Via le script en ligne de commande
-
-```
-python main.py
+# Linux
+sudo apt-get install redis-server
+sudo systemctl start redis
 ```
 
-Le script va :
-1. Charger les associations hash-nom existantes depuis `faces_data.json` (si présent)
-2. Créer un nouveau jeu
-3. Récupérer et traiter les 10 questions une par une
-4. Utiliser les associations connues pour faire des suppositions précises
-5. Enregistrer les nouvelles associations pour les utilisations futures
-6. Afficher un résumé des performances avec le score total et la précision
+2. Installer les dépendances Python :
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
 
-## Données
+3. Lancer l'application :
+```bash
+./run.sh
+```
 
-Les données sont stockées dans un fichier `faces_data.json` qui contient les associations entre les hashes des images et les noms des personnes. Le fichier est trié par ordre alphabétique des noms pour faciliter la lecture.
+## Configuration
 
-## Performance
+L'application est configurable via les variables d'environnement :
+- `FLASK_APP=app.py` : Fichier principal de l'application
+- `FLASK_ENV=development` : Mode développement
+- `FLASK_DEBUG=1` : Mode debug (optionnel)
 
-À la fin de chaque exécution, le script affiche :
-- Le score total accumulé
-- Le nombre de réponses correctes
-- Le pourcentage de précision
-- Le nombre total d'associations dans la base de données
+## Structure du projet
 
-Plus vous utilisez l'outil, plus sa base de connaissances s'enrichit, améliorant ainsi sa performance au fil du temps.
+```
+faces_solver/
+├── app.py              # Application Flask
+├── main.py            # Script principal
+├── cache_manager.py   # Gestionnaire de cache Redis
+├── requirements.txt   # Dépendances Python
+├── run.sh            # Script de démarrage
+└── faces_data.json   # Données persistantes
+```
 
-## Problèmes connus
+## Optimisations
 
-- L'outil nécessite une connexion internet et un accès au site de Lucca Faces.
-- Les performances peuvent varier en fonction de la qualité des images et des variations d'éclairage.
+1. **Cache Redis** :
+   - Index par hash d'image
+   - Index par nom
+   - Index par première lettre
+   - Pipeline Redis pour les opérations en lot
 
-## Contribuer
+2. **Requêtes asynchrones** :
+   - Récupération parallèle des images
+   - Réduction du temps d'attente
+   - Meilleure utilisation des ressources
 
-Les contributions sont les bienvenues ! N'hésitez pas à soumettre des pull requests ou à ouvrir des issues pour améliorer cet outil. 
+3. **Persistance** :
+   - Sauvegarde automatique dans JSON
+   - Chargement initial dans Redis
+   - Synchronisation bidirectionnelle
+
+## Logs
+
+Les logs sont disponibles dans :
+- Console : Logs en temps réel
+- `app.log` : Fichier de logs détaillé
+
+## Contribution
+
+Les contributions sont les bienvenues ! N'hésitez pas à :
+1. Fork le projet
+2. Créer une branche pour votre fonctionnalité
+3. Commiter vos changements
+4. Pousser vers la branche
+5. Ouvrir une Pull Request 

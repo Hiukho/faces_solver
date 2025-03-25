@@ -8,7 +8,11 @@ import base64
 import hashlib
 import time
 import os
+import asyncio
+import aiohttp
 from urllib.parse import urljoin
+from cache_manager import CacheManager
+from typing import Dict, List, Optional, Tuple, Set
 
 # Configuration du logging
 logging.basicConfig(
@@ -17,56 +21,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def load_existing_data():
-    """
-    Charge les données existantes du fichier faces_data.json.
-    
-    Returns:
-        dict: Dictionnaire des associations hash-nom
-    """
-    hash_name_map = {}
-    
-    try:
-        if os.path.exists('faces_data.json'):
-            logger.info("Chargement des données existantes de faces_data.json")
-            with open('faces_data.json', 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                
-                # Convertir la liste en dictionnaire
-                for item in data:
-                    if 'hash' in item and 'name' in item:
-                        hash_name_map[item['hash']] = item['name']
-                
-            logger.info(f"{len(hash_name_map)} associations hash-nom chargées.")
-        else:
-            logger.info("Aucun fichier faces_data.json existant. Création d'un nouveau fichier.")
-    except Exception as e:
-        logger.error(f"Erreur lors du chargement des données existantes: {e}")
-    
-    return hash_name_map
+# Initialisation du gestionnaire de cache
+cache_manager = CacheManager()
 
-def save_data(hash_name_map):
-    """
-    Enregistre les associations hash-nom dans un fichier JSON.
-    Les éléments sont triés par nom alphabétique.
-    
-    Args:
-        hash_name_map (dict): Dictionnaire des associations hash-nom
-    """
-    logger.info(f"Enregistrement de {len(hash_name_map)} associations hash-nom dans faces_data.json")
-    
-    # Transformer le dictionnaire en format attendu
-    json_data = [{"hash": hash_val, "name": name} for hash_val, name in hash_name_map.items()]
-    
-    # Trier les données par nom alphabétique
-    json_data_sorted = sorted(json_data, key=lambda x: x["name"])
-    
-    with open('faces_data.json', 'w', encoding='utf-8') as f:
-        json.dump(json_data_sorted, f, ensure_ascii=False, indent=2)
-    
-    logger.info("Enregistrement terminé avec succès. Données triées par nom alphabétique.")
-
-def make_guess(game_id, question_id, suggestion_id, headers, cookies):
+def make_guess(game_id: str, question_id: int, suggestion_id: int, headers: Dict, cookies: Dict) -> Optional[Dict]:
     """
     Fonction qui envoie une réponse (guess) pour une question.
     
@@ -107,15 +65,16 @@ def make_guess(game_id, question_id, suggestion_id, headers, cookies):
     
     return None
 
-def get_question_image(game_id, question_id, headers, cookies):
+async def get_question_image_async(session: aiohttp.ClientSession, game_id: str, question_id: int, headers: Dict, cookies: Dict) -> Optional[str]:
     """
-    Fonction qui récupère l'image associée à une question.
+    Version asynchrone de la fonction get_question_image.
     
     Args:
+        session (aiohttp.ClientSession): Session aiohttp
         game_id (str): L'ID du jeu
         question_id (int): L'ID de la question
-        headers (dict): Les en-têtes HTTP à envoyer
-        cookies (dict): Les cookies à inclure dans la requête
+        headers (dict): Les en-têtes HTTP
+        cookies (dict): Les cookies
         
     Returns:
         str: Le hash de l'image en base64 ou None en cas d'erreur
@@ -133,27 +92,53 @@ def get_question_image(game_id, question_id, headers, cookies):
     })
     
     try:
-        logger.info(f"Récupération de l'image de la question {question_id}...")
-        response = requests.get(url, headers=image_headers, cookies=cookies)
-        response.raise_for_status()
-        
-        # Conversion de l'image en base64
-        image_base64 = base64.b64encode(response.content).decode('utf-8')
-        
-        # Calcul du hash SHA-256 de l'image en base64
-        image_hash = hashlib.sha256(image_base64.encode('utf-8')).hexdigest()
-        
-        logger.info(f"Image récupérée et convertie en base64 avec succès.")
-        logger.info(f"Hash SHA-256 de l'image: {image_hash}")
-        
-        return image_hash
-        
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Erreur lors de la récupération de l'image: {e}")
+        logger.info(f"Récupération asynchrone de l'image de la question {question_id}...")
+        async with session.get(url, headers=image_headers, cookies=cookies) as response:
+            if response.status == 200:
+                image_data = await response.read()
+                image_base64 = base64.b64encode(image_data).decode('utf-8')
+                image_hash = hashlib.sha256(image_base64.encode('utf-8')).hexdigest()
+                logger.info(f"Image {question_id} récupérée et hashée avec succès.")
+                return image_hash
+            else:
+                logger.error(f"Erreur lors de la récupération de l'image {question_id}: {response.status}")
+    except Exception as e:
+        logger.error(f"Erreur lors de la récupération asynchrone de l'image {question_id}: {e}")
     
     return None
 
-def get_next_question(game_id, headers, cookies):
+async def fetch_all_images(game_id: str, start_question_id: int, num_questions: int, headers: Dict, cookies: Dict) -> Dict[int, str]:
+    """
+    Récupère toutes les images de manière asynchrone.
+    
+    Args:
+        game_id (str): L'ID du jeu
+        start_question_id (int): ID de la première question
+        num_questions (int): Nombre de questions à récupérer
+        headers (dict): Les en-têtes HTTP
+        cookies (dict): Les cookies
+        
+    Returns:
+        Dict[int, str]: Dictionnaire mapping question_id -> image_hash
+    """
+    image_hashes = {}
+    
+    async with aiohttp.ClientSession() as session:
+        tasks = []
+        for i in range(num_questions):
+            question_id = start_question_id + i
+            task = get_question_image_async(session, game_id, question_id, headers, cookies)
+            tasks.append((question_id, task))
+        
+        # Exécuter toutes les tâches en parallèle
+        for question_id, task in tasks:
+            image_hash = await task
+            if image_hash:
+                image_hashes[question_id] = image_hash
+    
+    return image_hashes
+
+def get_next_question(game_id: str, headers: Dict, cookies: Dict) -> Optional[Dict]:
     """
     Fonction qui récupère la prochaine question du jeu.
     
@@ -192,6 +177,62 @@ def get_next_question(game_id, headers, cookies):
     
     return None
 
+def process_question(next_question: Dict, image_hash: str, headers: Dict, cookies: Dict, game_id: str) -> Tuple[bool, Optional[int], Optional[Dict]]:
+    """
+    Traite une question et retourne les informations nécessaires.
+    
+    Args:
+        next_question (Dict): Les données de la question
+        image_hash (str): Le hash de l'image
+        headers (Dict): Les en-têtes HTTP
+        cookies (Dict): Les cookies
+        game_id (str): L'ID du jeu
+        
+    Returns:
+        Tuple[bool, Optional[int], Optional[Dict]]: (succès, suggestion_id, résultat)
+    """
+    if not next_question or 'id' not in next_question:
+        return False, None, None
+        
+    question_id = next_question['id']
+    
+    # Créer les dictionnaires de mapping
+    suggestion_map = {}
+    name_suggestion_map = {}
+    if 'suggestions' in next_question:
+        for suggestion in next_question['suggestions']:
+            suggestion_map[suggestion['id']] = suggestion['value']
+            name_suggestion_map[suggestion['value']] = suggestion['id']
+    
+    # Vérifier le cache Redis
+    known_person = False
+    correct_suggestion_id = None
+    
+    try:
+        if image_hash:
+            known_name = cache_manager.get(image_hash)
+            if known_name:
+                logger.info(f"Hash déjà connu! Il correspond à: {known_name}")
+                
+                # Vérifier si le nom connu est dans les suggestions
+                if known_name in name_suggestion_map:
+                    correct_suggestion_id = name_suggestion_map[known_name]
+                    logger.info(f"Personne connue trouvée dans les suggestions avec l'ID: {correct_suggestion_id}")
+                    known_person = True
+    except Exception as e:
+        logger.warning(f"Erreur lors de l'accès au cache Redis: {e}")
+        logger.info("Continuation sans utiliser le cache...")
+    
+    # Faire le guess
+    if 'suggestions' in next_question and len(next_question['suggestions']) > 0:
+        suggestion_id = correct_suggestion_id if known_person else next_question['suggestions'][0]['id']
+        logger.info(f"Utilisation de l'ID de suggestion: {suggestion_id}")
+        
+        guess_result = make_guess(game_id, question_id, suggestion_id, headers, cookies)
+        return True, suggestion_id, guess_result
+    
+    return False, None, None
+
 def main():
     """
     Fonction principale qui effectue l'appel API et extrait l'ID de la réponse.
@@ -215,25 +256,19 @@ def main():
     }
     
     cookies = {
-        '_BEAMER_USER_ID_xWDIXXVd32349': 'token',
-        '_BEAMER_FIRST_VISIT_xWDIXXVd32349': '2025-03-24T19:58:05.317Z',
-        'authToken': 'token'
+        '_BEAMER_USER_ID_xWDIXXVd32349': '866ab2c3-8cd5-4172-a352-145f7f6fbc34',
+        '_BEAMER_FIRST_VISIT_xWDIXXVd32349': '2025-01-13T14:17:30.055Z',
+        'authToken': '4ee94e71-aa02-448d-977a-b8dac41b2007'
     }
     
-    # Pour s'assurer que le payload est bien envoyé comme JSON
-    data = {}
-    
-    # Charger les associations hash-nom existantes
-    hash_name_map = load_existing_data()
-    
-    # Initialiser le compteur de score
+    # Initialiser les compteurs
     total_score = 0
     correct_guesses = 0
     total_guesses = 0
     
     try:
         logger.info("Envoi de la requête à l'API pour créer un nouveau jeu...")
-        response = requests.post(url, headers=headers, cookies=cookies, json=data)
+        response = requests.post(url, headers=headers, cookies=cookies, json={})
         response.raise_for_status()
         
         response_json = response.json()
@@ -242,107 +277,75 @@ def main():
             game_id = response_json['id']
             logger.info(f"ID du jeu récupéré: {game_id}")
             
-            # Boucle de 10 itérations pour récupérer les questions et faire les guesses
+            # Récupérer la première question pour obtenir son ID
+            first_question = get_next_question(game_id, headers, cookies)
+            if not first_question or 'id' not in first_question:
+                logger.error("Impossible de récupérer la première question")
+                return
+                
+            start_question_id = first_question['id']
+            logger.info(f"ID de la première question: {start_question_id}")
+            
+            # Récupérer toutes les images de manière asynchrone
+            logger.info("Récupération asynchrone de toutes les images...")
+            image_hashes = asyncio.run(fetch_all_images(game_id, start_question_id, 10, headers, cookies))
+            logger.info(f"{len(image_hashes)} images récupérées avec succès")
+            
+            # Boucle de 10 itérations
             for i in range(10):
                 logger.info(f"Itération {i+1}/10")
                 
                 # Récupérer la prochaine question
                 next_question = get_next_question(game_id, headers, cookies)
+                if not next_question:
+                    continue
+                    
+                # Récupérer le hash de l'image depuis notre dictionnaire
+                image_hash = image_hashes.get(next_question['id'])
+                if not image_hash:
+                    logger.warning(f"Hash non trouvé pour la question {next_question['id']}")
+                    continue
                 
-                # Si nous avons bien récupéré la question
-                if next_question and 'id' in next_question:
-                    question_id = next_question['id']
+                # Traiter la question
+                success, suggestion_id, guess_result = process_question(next_question, image_hash, headers, cookies, game_id)
+                
+                if success and guess_result:
+                    total_guesses += 1
                     
-                    # Récupérer l'image de la question
-                    image_hash = get_question_image(game_id, question_id, headers, cookies)
+                    # Mettre à jour le score
+                    if 'score' in guess_result:
+                        total_score += guess_result['score']
+                        logger.info(f"Score pour cette question: {guess_result['score']}")
                     
-                    # Créer un dictionnaire pour associer les IDs des suggestions avec leurs valeurs (noms)
-                    suggestion_map = {}
-                    # Créer un dictionnaire inverse pour associer les noms avec les IDs des suggestions
-                    name_suggestion_map = {}
-                    if 'suggestions' in next_question:
-                        for suggestion in next_question['suggestions']:
-                            suggestion_map[suggestion['id']] = suggestion['value']
-                            name_suggestion_map[suggestion['value']] = suggestion['id']
+                    # Vérifier si la réponse est correcte
+                    if guess_result.get('correctSuggestionId') == guess_result.get('suggestionId'):
+                        correct_guesses += 1
+                        logger.info(f"Réponse correcte ! ({correct_guesses}/{total_guesses})")
+                    else:
+                        logger.warning(f"Réponse incorrecte. ID correct: {guess_result.get('correctSuggestionId')}, ID fourni: {guess_result.get('suggestionId')}")
                     
-                    # Vérifier si le hash existe déjà dans notre base de données
-                    known_person = False
-                    correct_suggestion_id = None
-                    
-                    if image_hash in hash_name_map:
-                        known_name = hash_name_map[image_hash]
-                        logger.info(f"Hash déjà connu! Il correspond à: {known_name}")
-                        
-                        # Vérifier si le nom connu est dans les suggestions
-                        if known_name in name_suggestion_map:
-                            correct_suggestion_id = name_suggestion_map[known_name]
-                            logger.info(f"Personne connue trouvée dans les suggestions avec l'ID: {correct_suggestion_id}")
-                            known_person = True
-                    
-                    # Faire le guess
-                    if 'suggestions' in next_question and len(next_question['suggestions']) > 0:
-                        # Si on connaît la personne, on utilise son ID de suggestion pour le guess
-                        if known_person and correct_suggestion_id:
-                            suggestion_id = correct_suggestion_id
-                            logger.info(f"Utilisation de l'ID de suggestion connu: {suggestion_id}")
-                        else:
-                            # Sinon, on utilise la première suggestion
-                            suggestion_id = next_question['suggestions'][0]['id']
-                            logger.info(f"Utilisation de la première suggestion: {suggestion_id}")
-                        
-                        # Faire le guess avec la suggestion choisie
-                        guess_result = make_guess(game_id, question_id, suggestion_id, headers, cookies)
-                        
-                        # Incrémenter le nombre total de guesses
-                        total_guesses += 1
-                        
-                        # Si on a bien reçu un résultat et qu'il contient l'ID de la suggestion correcte
-                        if guess_result:
-                            # Ajouter le score au total
-                            if 'score' in guess_result:
-                                question_score = guess_result['score']
-                                total_score += question_score
-                                logger.info(f"Score pour cette question: {question_score}")
+                    # Mettre à jour le cache si nécessaire
+                    if 'correctSuggestionId' in guess_result:
+                        correct_suggestion_id = guess_result['correctSuggestionId']
+                        if correct_suggestion_id in suggestion_map:
+                            correct_name = suggestion_map[correct_suggestion_id]
+                            logger.info(f"La réponse correcte est: {correct_name}")
                             
-                            # Vérifier si la réponse était correcte
-                            if 'isCorrect' in guess_result and guess_result['isCorrect']:
-                                correct_guesses += 1
-                                logger.info("Réponse correcte! 🎉")
-                            
-                            if 'correctSuggestionId' in guess_result:
-                                correct_suggestion_id = guess_result['correctSuggestionId']
-                                
-                                # Récupérer le nom correspondant à la suggestion correcte
-                                if correct_suggestion_id in suggestion_map:
-                                    correct_name = suggestion_map[correct_suggestion_id]
-                                    logger.info(f"La réponse correcte est: {correct_name}")
-                                    
-                                    # Associer le hash de l'image avec le nom correct
-                                    if image_hash:
-                                        logger.info(f"Association du hash de la photo avec {correct_name}")
-                                        
-                                        # Ajouter l'association hash-nom au dictionnaire
-                                        hash_name_map[image_hash] = correct_name
-                                else:
-                                    logger.warning(f"ID de suggestion correct {correct_suggestion_id} non trouvé dans les suggestions.")
-                    
-                    # Petite pause pour éviter de surcharger l'API
-                    time.sleep(1)
-                else:
-                    logger.error("Impossible de récupérer la prochaine question. Arrêt de la boucle.")
-                    break
+                            if image_hash:
+                                logger.info(f"Association du hash de la photo avec {correct_name}")
+                                cache_manager.set(image_hash, correct_name)
+                
+                # Petite pause pour éviter de surcharger l'API
+                time.sleep(1)
             
-            # Enregistrer les associations hash-nom dans un fichier JSON
-            save_data(hash_name_map)
-            
-            # Afficher le résumé des scores
+            # Afficher le résumé
             accuracy = (correct_guesses / total_guesses * 100) if total_guesses > 0 else 0
             logger.info("=" * 50)
             logger.info("RÉSUMÉ DU JEU")
             logger.info("=" * 50)
             logger.info(f"Score total: {total_score} points")
             logger.info(f"Réponses correctes: {correct_guesses}/{total_guesses} ({accuracy:.1f}%)")
-            logger.info(f"Nombre total d'associations hash-nom: {len(hash_name_map)}")
+            logger.info(f"Nombre total d'associations hash-nom: {len(cache_manager.get_all())}")
             logger.info("=" * 50)
             
         else:

@@ -15,10 +15,14 @@ import requests
 import importlib.util
 from urllib.parse import urljoin
 import argparse
+from cache_manager import CacheManager
 
 # Configuration de l'encodage pour le système
 sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
+
+# Initialisation du gestionnaire de cache Redis
+cache_manager = CacheManager()
 
 # Paramètres en ligne de commande pour le mode verbeux
 parser = argparse.ArgumentParser(description='Application Lucca Faces Solver')
@@ -46,9 +50,15 @@ else:
 app = Flask(__name__)
 
 def load_data():
-    """Charger les données existantes depuis le fichier JSON."""
+    """Charger les données existantes depuis Redis et le fichier JSON."""
     data = {}
     try:
+        # Charger depuis Redis si disponible
+        redis_data = cache_manager.get_all()
+        if redis_data:
+            data.update(redis_data)
+        
+        # Charger depuis le fichier JSON (backup)
         if os.path.exists('faces_data.json'):
             with open('faces_data.json', 'r', encoding='utf-8') as f:
                 file_content = json.load(f)
@@ -59,28 +69,34 @@ def load_data():
                     for item in file_content:
                         if 'hash' in item and 'name' in item:
                             data[item['hash']] = item['name']
+                            # Mettre à jour Redis si disponible
+                            cache_manager.set(item['hash'], item['name'])
                 else:
                     # Si c'est déjà un dictionnaire, l'utiliser directement
-                    data = file_content
-                    
-            logger.info(f"Données existantes chargées. {len(data)} associations hash-nom trouvées.")
-        else:
-            logger.info("Aucun fichier de données existant. Création d'une nouvelle base de données.")
+                    for hash_key, name in file_content.items():
+                        if hash_key not in data:  # Ne pas écraser les données Redis
+                            data[hash_key] = name
+                            # Mettre à jour Redis si disponible
+                            cache_manager.set(hash_key, name)
     except Exception as e:
-        logger.error(f"Erreur lors du chargement des données: {e}")
+        logger.warning(f"Erreur lors du chargement des données: {e}")
     return data
 
 def save_data(data):
-    """Sauvegarder les données dans le fichier JSON, triées par nom."""
+    """Sauvegarder les données dans Redis et le fichier JSON, triées par nom."""
     try:
         # Trier les données par nom (clé) en ordre alphabétique
         sorted_data = {k: data[k] for k in sorted(data.keys())}
         
+        # Sauvegarder dans Redis si disponible
+        for hash_key, name in sorted_data.items():
+            cache_manager.set(hash_key, name)
+        
+        # Sauvegarder dans le fichier JSON (backup)
         with open('faces_data.json', 'w', encoding='utf-8') as f:
             json.dump(sorted_data, f, indent=4, ensure_ascii=False)
-        logger.info(f"Données sauvegardées avec succès. {len(sorted_data)} associations hash-nom.")
     except Exception as e:
-        logger.error(f"Erreur lors de la sauvegarde des données: {e}")
+        logger.warning(f"Erreur lors de la sauvegarde des données: {e}")
 
 def parse_curl(curl_command):
     """Extraire les headers et cookies d'une commande cURL."""
@@ -234,17 +250,14 @@ def get_next_question(game_id, headers):
 
 def run_game(curl_data):
     """Exécuter le jeu avec les données de cURL fournies."""
-    logs = []
-    
     try:
         # Extraire les headers de la commande cURL
         headers = curl_data['headers']
         
-        # Charger les données existantes
+        # Charger les données existantes depuis Redis et JSON
         data = load_data()
-        logs.append(f"Données existantes chargées: {len(data)} associations hash-nom.")
         
-        # Stats du jeu
+        # Initialiser les statistiques du jeu
         total_score = 0
         correct_guesses = 0
         total_guesses = 0
@@ -254,246 +267,130 @@ def run_game(curl_data):
         response = requests.post(url, headers=headers)
         
         if response.status_code != 200:
-            logs.append(f"Erreur lors de la création du jeu: {response.status_code}")
-            if args.verbose:
-                logs.append(f"Détails: {response.text}")
             return {
-                "error": "Impossible de créer un nouveau jeu. Vérifiez votre commande cURL.",
-                "logs": logs
+                "error": "Impossible de créer un nouveau jeu. Vérifiez votre commande cURL."
             }
         
+        # Extraire l'ID du jeu de la réponse
         game_data = response.json()
-        # Ne pas logger la réponse complète sauf en mode verbeux
-        if args.verbose:
-            logs.append(f"Réponse complète de création du jeu: {safe_json_dumps(game_data)}")
-        
-        # Extraire l'ID du jeu (compatible avec différentes structures API)
-        game_id = None
-        if isinstance(game_data, dict):
-            game_id = game_data.get("id")
-        elif isinstance(game_data, str):
-            game_id = game_data
+        game_id = game_data.get("id") if isinstance(game_data, dict) else game_data
             
         if not game_id:
-            logs.append("Impossible d'extraire l'ID du jeu de la réponse API")
             return {
-                "error": "Format de réponse API non reconnu",
-                "logs": logs
+                "error": "Format de réponse API non reconnu"
             }
-            
-        logs.append(f"Nouveau jeu créé avec l'ID: {game_id}")
         
-        # Boucle de jeu principale
-        for i in range(10):  # Le jeu a 10 questions
-            logs.append(f"\n--- Question {i+1}/10 ---")
-            
+        # Boucle principale du jeu (10 questions)
+        for i in range(10):
             # Obtenir la prochaine question
             question = get_next_question(game_id, headers)
-            # Ne pas logger la réponse complète sauf en mode verbeux
-            if args.verbose:
-                logs.append(f"Réponse API complète pour la question: {safe_json_dumps(question)}")
-            
             if not question:
-                logs.append("Impossible d'obtenir la prochaine question. Le jeu s'arrête.")
                 break
             
-            # Extraire les informations de la question (compatible avec différentes structures API)
-            question_id = None
-            image_url = None
-            suggestions = []
-            
-            if isinstance(question, dict):
-                question_id = question.get("id")
-                # Différentes versions API peuvent avoir des champs différents
-                image_url = question.get("imageUrl") or question.get("pictureUrl")
-                
-                # Les suggestions peuvent être dans différents formats selon la version de l'API
-                api_suggestions = question.get("suggestions", [])
-                if isinstance(api_suggestions, list):
-                    suggestions = api_suggestions
+            # Extraire les informations de la question
+            question_id = question.get("id") if isinstance(question, dict) else None
+            image_url = question.get("imageUrl") or question.get("pictureUrl")
+            suggestions = question.get("suggestions", []) if isinstance(question, dict) else []
             
             if not question_id or not image_url:
-                logs.append("Format de question non reconnu. Passage à la suivante.")
                 continue
-                
-            logs.append(f"Question ID: {question_id}")
-            if args.verbose:
-                logs.append(f"Image URL: {image_url}")
-            
-            # Afficher les suggestions pour débogage, uniquement en mode verbeux
-            if args.verbose and suggestions:
-                logs.append("Suggestions disponibles:")
-                for suggestion in suggestions:
-                    # Les suggestions peuvent être des objets ou des chaînes selon la version de l'API
-                    if isinstance(suggestion, dict):
-                        suggestion_id = suggestion.get("id")
-                        suggestion_value = suggestion.get("value")
-                        logs.append(f"  - ID: {suggestion_id}, Valeur: {suggestion_value}")
-                    else:
-                        logs.append(f"  - Suggestion: {suggestion}")
-            elif not suggestions:
-                logs.append("Aucune suggestion disponible dans la réponse API.")
-            else:
-                logs.append(f"{len(suggestions)} suggestions disponibles")
             
             # Calculer le hash de l'image
             image_hash = get_image_hash(image_url, headers)
             if not image_hash:
-                logs.append("Impossible de calculer le hash de l'image. Passage à la question suivante.")
                 continue
             
-            logs.append(f"Hash de l'image: {image_hash[:8]}...") # Afficher seulement le début du hash
-            
-            # Vérifier si le hash est connu
+            # Vérifier si le hash est connu dans Redis
             suggestion_id = None
             suggestion_value = None
-            if image_hash in data:
-                person_name = data[image_hash]
-                logs.append(f"Hash déjà connu! Cette personne est: {person_name}")
-                
-                # Rechercher cette personne dans les suggestions
-                for suggestion in suggestions:
-                    if isinstance(suggestion, dict):
-                        if suggestion.get("value", "").lower() == person_name.lower():
-                            suggestion_id = suggestion.get("id")
-                            suggestion_value = suggestion.get("value")
-                            logs.append(f"Suggestion trouvée dans la liste: {suggestion_value}")
-                            if args.verbose:
-                                logs.append(f"avec ID: {suggestion_id}")
+            try:
+                if image_hash in data:
+                    # Hash trouvé, récupérer le nom associé
+                    person_name = data[image_hash]
+                    
+                    # Chercher le nom dans les suggestions
+                    for suggestion in suggestions:
+                        if isinstance(suggestion, dict):
+                            if suggestion.get("value", "").lower() == person_name.lower():
+                                suggestion_id = suggestion.get("id")
+                                suggestion_value = suggestion.get("value")
+                                break
+                        elif isinstance(suggestion, str) and suggestion.lower() == person_name.lower():
+                            suggestion_id = suggestions.index(suggestion)
+                            suggestion_value = suggestion
                             break
-                    elif isinstance(suggestion, str) and suggestion.lower() == person_name.lower():
-                        suggestion_id = suggestions.index(suggestion)  # Utiliser l'index comme ID
-                        suggestion_value = suggestion
-                        logs.append(f"Suggestion trouvée dans la liste: {suggestion_value}")
-                        break
+            except Exception:
+                # Continuer sans le cache en cas d'erreur Redis
+                pass
             
-            # Si aucune suggestion n'a été trouvée, prendre la première de la liste
+            # Si aucune correspondance trouvée, utiliser la première suggestion
             if not suggestion_id and suggestions:
                 suggestion = suggestions[0]
-                if isinstance(suggestion, dict):
-                    suggestion_id = suggestion.get("id")
-                    suggestion_value = suggestion.get("value")
-                else:
-                    suggestion_id = 0  # Premier index
-                    suggestion_value = suggestion
-                
-                logs.append(f"Aucune correspondance trouvée. Utilisation de la première suggestion: {suggestion_value}")
+                suggestion_id = suggestion.get("id") if isinstance(suggestion, dict) else 0
+                suggestion_value = suggestion.get("value") if isinstance(suggestion, dict) else suggestion
             
-            # Faire une supposition
+            # Faire une supposition si on a un ID de suggestion
             if suggestion_id is not None:
                 total_guesses += 1
                 
-                # Adapter le format pour l'API
-                guess_payload = {}
-                if isinstance(suggestions[0], dict):
-                    # Format avec ID de suggestion
-                    guess_payload = {
-                        "questionId": question_id,
-                        "suggestionId": suggestion_id
-                    }
-                else:
-                    # Format avec suggestion directe
-                    guess_payload = {
-                        "suggestion": suggestion_value
-                    }
+                # Préparer le payload selon le format de l'API
+                guess_payload = (
+                    {"questionId": question_id, "suggestionId": suggestion_id}
+                    if isinstance(suggestions[0], dict)
+                    else {"suggestion": suggestion_value}
+                )
                 
+                # Envoyer la supposition
                 guess_result = make_api_guess(game_id, question_id, guess_payload, headers)
-                # Ne pas logger le résultat complet sauf en mode verbeux
-                if args.verbose:
-                    logs.append(f"Résultat complet du guess: {safe_json_dumps(guess_result)}")
                 
                 if guess_result:
-                    # Extraire les informations de manière flexible pour supporter différentes versions API
-                    is_correct = False
-                    score = 0
+                    # Vérifier si la réponse est correcte
+                    is_correct = guess_result.get('suggestionId') == guess_result.get('correctSuggestionId')
+                    score = guess_result.get("score", 0)
+                    
+                    # Récupérer le nom correct
                     correct_name = ""
+                    if "correctAnswer" in guess_result:
+                        correct_name = guess_result.get("correctAnswer")
+                    elif "correctSuggestionId" in guess_result:
+                        correct_id = guess_result.get("correctSuggestionId")
+                        for suggestion in suggestions:
+                            if isinstance(suggestion, dict) and suggestion.get("id") == correct_id:
+                                correct_name = suggestion.get("value", "")
+                                break
                     
-                    if isinstance(guess_result, dict):
-                        # Différentes clés possibles selon la version de l'API
-                        is_correct = guess_result.get("isCorrect", False) or guess_result.get("correct", False)
-                        score = guess_result.get("score", 0)
-                        
-                        # Récupérer le nom correct
-                        if "correctAnswer" in guess_result:
-                            correct_name = guess_result.get("correctAnswer")
-                        elif "correctSuggestionId" in guess_result:
-                            correct_id = guess_result.get("correctSuggestionId")
-                            # Trouver le nom correspondant à l'ID correct
-                            for suggestion in suggestions:
-                                if isinstance(suggestion, dict) and suggestion.get("id") == correct_id:
-                                    correct_name = suggestion.get("value", "")
-                                    break
-                    
+                    # Mettre à jour les statistiques
                     total_score += score
-                    
                     if is_correct:
                         correct_guesses += 1
-                        logs.append(f"Réponse correcte! Score pour cette question: {score}")
-                    else:
-                        logs.append(f"Réponse incorrecte. La bonne réponse était: {correct_name}. Score: {score}")
                     
-                    # Associer le hash avec le nom correct pour les utilisations futures
+                    # Mettre à jour le cache Redis avec le nom correct
                     if correct_name:
                         data[image_hash] = correct_name
-                        logs.append(f"Association du hash avec le nom '{correct_name}' pour les utilisations futures.")
-                else:
-                    logs.append("Erreur lors de la soumission de la supposition.")
-            else:
-                logs.append("Aucune suggestion disponible pour cette question.")
+                        try:
+                            cache_manager.set(image_hash, correct_name)
+                        except Exception:
+                            pass
             
-            # Petite pause pour éviter de surcharger l'API
-            # Réduire le temps d'attente pour plus de rapidité
-            time.sleep(0.3)  # Réduit de 0.5 à 0.3 secondes
-        
-        # Avant la sauvegarde des données mises à jour, filtrer les logs pour éviter des chaînes trop longues ou erreurs d'encodage
-        filtered_logs = []
-        for log in logs:
-            # Vérifier si c'est une chaîne
-            if isinstance(log, str):
-                # Ajouter directement les logs courts
-                if len(log) < 1000:
-                    filtered_logs.append(log)
-                else:
-                    # Tronquer les logs trop longs pour éviter des problèmes d'affichage
-                    filtered_logs.append(log[:500] + "... [tronqué]")
-            else:
-                # Convertir les non-chaînes en chaîne
-                try:
-                    filtered_logs.append(str(log))
-                except:
-                    filtered_logs.append("[Impossible d'afficher ce log]")
-        
-        # Remplacer les logs par les versions filtrées
-        logs = filtered_logs
+            # Petit délai pour éviter de surcharger l'API
+            time.sleep(0.1)
         
         # Sauvegarder les données mises à jour
         save_data(data)
-        logs.append("\n--- Résumé du jeu ---")
-        logs.append(f"Score total: {total_score}")
         
-        # Calcul de la précision
+        # Retourner les statistiques du jeu
         accuracy = (correct_guesses / total_guesses * 100) if total_guesses > 0 else 0
-        accuracy_formatted = f"{accuracy:.1f}%"
-        
-        logs.append(f"Réponses correctes: {correct_guesses}/{total_guesses} ({accuracy_formatted})")
-        logs.append(f"Associations dans la base de données: {len(data)}")
-        
         return {
             "total_score": total_score,
             "correct_guesses": correct_guesses,
             "total_guesses": total_guesses,
-            "accuracy": accuracy_formatted,
-            "hash_name_count": len(data),
-            "logs": logs
+            "accuracy": f"{accuracy:.1f}%",
+            "hash_name_count": len(data)
         }
         
     except Exception as e:
-        logs.append(f"Erreur lors de l'exécution du jeu: {str(e)}")
-        import traceback
-        logs.append(f"Détails de l'erreur: {traceback.format_exc()}")
         return {
-            "error": f"Erreur: {str(e)}",
-            "logs": logs
+            "error": f"Erreur: {str(e)}"
         }
 
 @app.route('/')
