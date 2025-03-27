@@ -97,6 +97,10 @@
                                 <textarea class="form-control" id="curlCommand" rows="5" placeholder="Collez ici la commande cURL..."></textarea>
                                 <div class="form-text">La commande doit contenir vos cookies d'authentification pour que le jeu fonctionne.</div>
                             </div>
+                            <div class="form-group">
+                                <label for="total-games">Nombre de parties à jouer :</label>
+                                <input type="number" id="total-games" name="total_games" min="1" max="20" value="10">
+                            </div>
                             <div class="alert alert-info">
                                 <h4 class="alert-heading">Astuces importantes :</h4>
                                 <ul>
@@ -196,6 +200,7 @@
             e.preventDefault();
             
             const curlCommand = document.getElementById('curlCommand').value;
+            const totalGames = document.getElementById('total-games').value;
             if (!curlCommand) {
                 showError("Veuillez coller une commande cURL");
                 return;
@@ -215,7 +220,8 @@
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
-                    curl_command: curlCommand
+                    curl_command: curlCommand,
+                    total_games: totalGames
                 })
             })
             .then(response => response.json())
